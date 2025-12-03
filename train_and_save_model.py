@@ -1,64 +1,85 @@
 import pandas as pd
+from sklearn.datasets import load_breast_cancer
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
 from sklearn.metrics import accuracy_score
 from google.cloud import storage
 import joblib
 from datetime import datetime
+import os
 
-# Download necessary data - Iris data from sklearn library
-# We define a function to download the data
-def download_data():
-  from sklearn.datasets import load_iris
-  iris = load_iris()
-  features = pd.DataFrame(iris.data, columns=iris.feature_names)
-  target = pd.Series(iris.target)
-  return features, target
 
-# Define a function to preprocess the data
-# In this case, preprocessing will be just splitting the data into training and testing sets
-def preprocess_data(X, y):
-  X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-  return X_train, X_test, y_train, y_test
+def load_data():
+    """Load the Breast Cancer dataset and return features and target."""
+    data = load_breast_cancer()
+    X = pd.DataFrame(data.data, columns=data.feature_names)
+    y = pd.Series(data.target, name="target")
+    return X, y
 
-# Define a function to train the model
-def train_model(X_train, y_train):
-  model = RandomForestClassifier(n_estimators=100, random_state=42)
-  model.fit(X_train, y_train)
-  return model
 
-# Define a function to save the model both locally and in GCS
+def build_model():
+    """
+    Build a simple ML pipeline:
+    - Standardize features
+    - Train logistic regression classifier
+    """
+    pipe = Pipeline(
+        steps=[
+            ("scaler", StandardScaler()),
+            ("clf", LogisticRegression(max_iter=1000)),
+        ]
+    )
+    return pipe
+
+
+def train_model(X, y, test_size=0.2, random_state=42):
+    """Split data, train model, and return fitted model + accuracy."""
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, random_state=random_state, stratify=y
+    )
+
+    model = build_model()
+    model.fit(X_train, y_train)
+
+    y_pred = model.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+    print(f"Model accuracy: {acc:.4f}")
+
+    return model, acc
+
+
 def save_model_to_gcs(model, bucket_name, blob_name):
-  joblib.dump(model, "model.joblib")
-  
-  # Save the model to GCS
-  storage_client = storage.Client()
-  bucket = storage_client.bucket(bucket_name)
-  blob = bucket.blob(blob_name)
-  blob.upload_from_filename('model.joblib')
+    """Save the trained model object to a GCS bucket as a joblib file."""
+    local_path = "model.joblib"
+    joblib.dump(model, local_path)
+    print(f"Saved model locally to {local_path}")
 
-# Putting all functions together
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    blob.upload_from_filename(local_path)
+
+    print(f"Uploaded model to gs://{bucket_name}/{blob_name}")
+
+
 def main():
-  # Download data
-  X, y = download_data()
-  X_train, X_test, y_train, y_test = preprocess_data(X, y)
-  
-  # Train model
-  model = train_model(X_train, y_train)
-  
-  # Evaluate model
-  y_pred = model.predict(X_test)
-  accuracy = accuracy_score(y_test, y_pred)
-  print(f'Model accuracy: {accuracy}')
-  
-  # Save the model to gcs
-  bucket_name = "github-action-lab"
-  timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-  blob_name = f"trained_models/model_{timestamp}.joblib"
-  save_model_to_gcs(model, bucket_name, blob_name)
-  print(f"Model saved to gs://{bucket_name}/{blob_name}")
-  
-if __name__ == "__main__":
-  main()
+    X, y = load_data()
+    model, acc = train_model(X, y)
 
-  
+    bucket_name = os.environ.get("GCS_MODEL_BUCKET")
+    if not bucket_name:
+        raise ValueError(
+            "Environment variable GCS_MODEL_BUCKET is not set. "
+            "Set it in your GitHub Actions workflow or local env."
+        )
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    blob_name = f"trained_models/breast_cancer_model_{timestamp}.joblib"
+
+    save_model_to_gcs(model, bucket_name, blob_name)
+
+
+if __name__ == "__main__":
+    main()
